@@ -173,7 +173,8 @@ namespace ArcForPublicCloud
         private const string HCRPResourceType = "microsoft.hybridcompute/machines";
         private const string HCRPApiVersion = "2023-03-15-preview";
         private const string EC2InstanceName = "EC2Instance";
-
+        private static readonly IAmazonCloudWatch _amazonCloudWatch;
+        
         public static async Task<List<PublicCloudARMResourceModel>> GetAllResources(
             AwsCredentials awsCreds,
             string awsAccountId,
@@ -198,7 +199,8 @@ namespace ArcForPublicCloud
             foreach (var metricName in processorCounterMap)
             {
                 string counterName = Enum.GetName(typeof(WMICounterNames), metricName.CounterName);
-                var metricValue = await GetEC2MetricAsync(cloudWatchClient, instanceId, counterName, "CWAgent");
+                var metricValue = await GetEC2MetricAsyncForCPU(cloudWatchClient, instanceId, counterName, "CWAgent", timestamp);
+                //var metricValue = await GetEC2MetricAsync(cloudWatchClient, instanceId, counterName);
                 var value = Convert.ToString(metricValue);
 
                 if (!double.TryParse(value, out double parsedValue))
@@ -233,7 +235,8 @@ namespace ArcForPublicCloud
             foreach (var metricName in memoryCounterMap)
             {
                 string counterName = Enum.GetName(typeof(WMICounterNames), metricName.CounterName);
-                var metricValue = await GetEC2MetricAsync(cloudWatchClient, instanceId, counterName, "CWAgent");
+                var metricValue = await GetEC2MetricAsyncForMemory(cloudWatchClient, instanceId, counterName, "CWAgent", timestamp);
+                //var metricValue = await GetEC2MetricAsync(cloudWatchClient, instanceId, counterName);
                 var value = Convert.ToString(metricValue);
 
                 if (!double.TryParse(value, out double parsedValue))
@@ -268,7 +271,8 @@ namespace ArcForPublicCloud
             foreach (var counter in networkCounterMap)
             {
                 string counterName = Enum.GetName(typeof(WMICounterNames), counter.CounterName);
-                var metricValue = await GetEC2MetricAsync(cloudWatchClient, instanceId, counterName, "CWAgent");
+                var metricValue = await GetEC2MetricAsyncForNetwork(cloudWatchClient, instanceId, counterName, "CWAgent", timestamp);
+                //var metricValue = await GetEC2MetricAsync(cloudWatchClient, instanceId, counterName);
                 var value = Convert.ToString(metricValue);
 
                 if (!double.TryParse(value, out double parsedValue))
@@ -289,11 +293,21 @@ namespace ArcForPublicCloud
 
             return networkDetails;
         }
+        private static string ExtractDeviceName(string devicePath)
+        {
+            if (string.IsNullOrEmpty(devicePath))
+            {
+                return "Unknown";
+            }
+
+            var parts = devicePath.Split('/');
+            return parts.Length > 0 ? parts[^1] : "Unknown";
+        }
 
         public static async Task<List<Dictionary<string, object>>> GetPerformanceDataForDiskAsync(
             AmazonCloudWatchClient cloudWatchClient,
             string instanceId,
-            DateTime timestamp)
+            DateTime timestamp,string instancetype,string deviceName,string imageId)
         {
             var diskCounterMap = WindowsUtils
                 .WindowsPerfCounterMap()[WMIClassName.Win32_PerfFormattedData_PerfDisk_PhysicalDisk];
@@ -302,7 +316,8 @@ namespace ArcForPublicCloud
             foreach (var metricName in diskCounterMap)
             {
                 string counterName = Enum.GetName(typeof(WMICounterNames), metricName.CounterName);
-                var metricValue = await GetEC2MetricAsync(cloudWatchClient, instanceId, counterName, "CWAgent");
+                
+                var metricValue = await GetEC2MetricAsyncForDisk(cloudWatchClient, instanceId, counterName, "CWAgent",timestamp,instancetype,ExtractDeviceName(deviceName),imageId);
                 var value = Convert.ToString(metricValue);
 
                 if (!double.TryParse(value, out double parsedValue))
@@ -324,62 +339,302 @@ namespace ArcForPublicCloud
             return diskDetails;
         }
 
-        private static async Task<double> GetEC2MetricAsync(
-            AmazonCloudWatchClient cloudWatchClient,
-            string instanceId,
-            string metricName,
-            string namespaceName,
-            int period = 300,
-            string statistic = "Average")
+       private static async Task<double> GetEC2MetricAsyncForDisk(
+             AmazonCloudWatchClient cloudWatchClient,
+             string instanceId,
+             string metricName,
+             string namespaceName, DateTime timestamp, string instanceType, string deviceName, string imageId,
+             int period = 300,
+             string statistic = "Average")
+         {
+            
+             var startTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day - 1, 1, 15, 0, DateTimeKind.Utc);
+             var endTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day, 6, 50, 0, DateTimeKind.Utc);
+             var request = new Amazon.CloudWatch.Model.GetMetricStatisticsRequest() 
+
+
+             {
+                 Namespace = namespaceName,
+                 MetricName = metricName,
+                Dimensions = new List<Dimension>
+         {
+             new Dimension
+             {
+                 Name = "InstanceId",
+                 Value = instanceId
+             },
+             new Dimension
+             {
+                 Name = "ImageId",
+                 Value = imageId
+             },
+            new Dimension
+             {
+                 Name = "InstanceType",
+                 Value = instanceType
+             },
+             new Dimension
+             {
+                 Name = "name",
+                 Value = deviceName
+             }
+
+         },
+                 StartTime = DateTime.UtcNow.AddHours(-24),  // Adjust the time range as needed
+                 EndTime = DateTime.UtcNow,
+                 Period = period,
+                 Statistics = new List<string> { statistic }
+             };
+
+
+             var response = await cloudWatchClient.GetMetricStatisticsAsync(request);
+             Console.WriteLine($"Metric: {metricName}, InstanceId: {instanceId}, Namespace: {namespaceName}");
+             Console.WriteLine($"Request StartTime: {startTime}, EndTime: {endTime}, Period: {period}, Statistic: {statistic}");
+             Console.WriteLine($"Number of DataPoints: {response.Datapoints.Count}");
+             if (response.Datapoints != null && response.Datapoints.Count > 0)
+             {
+                 // Return the average value of the latest data point
+                 var latestDataPoint = response.Datapoints.OrderByDescending(dp => dp.Timestamp).FirstOrDefault();
+                 if (latestDataPoint != null)
+                 {
+                     return latestDataPoint.Average;
+                 }
+             }
+
+             return 0;
+         }
+        private static async Task<double> GetEC2MetricAsyncForMemory(
+             AmazonCloudWatchClient cloudWatchClient,
+             string instanceId,
+             string metricName,
+             string namespaceName, DateTime timestamp,
+             int period = 300,
+             string statistic = "Average")
         {
-            var request = new Amazon.CloudWatch.Model.GetMetricStatisticsRequest
+
+            var startTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day - 1, 1, 15, 0, DateTimeKind.Utc);
+            var endTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day, 6, 50, 0, DateTimeKind.Utc);
+            var request = new Amazon.CloudWatch.Model.GetMetricStatisticsRequest()
+
+
             {
                 Namespace = namespaceName,
                 MetricName = metricName,
                 Dimensions = new List<Dimension>
-        {
-            new Dimension
-            {
-                Name = "InstanceId",
-                Value = instanceId
-            }
-        },
-                StartTime = DateTime.UtcNow.AddMinutes(-10),  // Adjust the time range as needed
+         {
+             new Dimension
+             {
+                 Name = "InstanceId",
+                 Value = instanceId
+             },
+             
+         },
+                StartTime = DateTime.UtcNow.AddHours(-24),  // Adjust the time range as needed
                 EndTime = DateTime.UtcNow,
                 Period = period,
                 Statistics = new List<string> { statistic }
             };
 
-            var response = await cloudWatchClient.GetMetricStatisticsAsync(request);
 
+            var response = await cloudWatchClient.GetMetricStatisticsAsync(request);
+            Console.WriteLine($"Metric: {metricName}, InstanceId: {instanceId}, Namespace: {namespaceName}");
+            Console.WriteLine($"Request StartTime: {startTime}, EndTime: {endTime}, Period: {period}, Statistic: {statistic}");
+            Console.WriteLine($"Number of DataPoints: {response.Datapoints.Count}");
             if (response.Datapoints != null && response.Datapoints.Count > 0)
             {
-                // Return the latest data point value
+                // Return the average value of the latest data point
                 var latestDataPoint = response.Datapoints.OrderByDescending(dp => dp.Timestamp).FirstOrDefault();
                 if (latestDataPoint != null)
                 {
-                    return statistic switch
-                    {
-                        "Average" => latestDataPoint.Average,
-                        "Sum" => latestDataPoint.Sum,
-                        "Minimum" => latestDataPoint.Minimum,
-                        "Maximum" => latestDataPoint.Maximum,
-                        _ => 0
-                    };
+                    return latestDataPoint.Average;
                 }
             }
 
             return 0;
         }
+        private static async Task<double> GetEC2MetricAsyncForCPU(
+             AmazonCloudWatchClient cloudWatchClient,
+             string instanceId,
+             string metricName,
+             string namespaceName, DateTime timestamp,
+             int period = 300,
+             string statistic = "Average")
+        {
 
+            var startTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day - 1, 1, 15, 0, DateTimeKind.Utc);
+            var endTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day, 6, 50, 0, DateTimeKind.Utc);
+            var request = new Amazon.CloudWatch.Model.GetMetricStatisticsRequest()
+
+
+            {
+                Namespace = namespaceName,
+                MetricName = metricName,
+                Dimensions = new List<Dimension>
+         {
+             new Dimension
+             {
+                 Name = "InstanceId",
+                 Value = instanceId
+             },
+             new Dimension
+             {
+                 Name = "cpu",
+                 Value ="cpu-total"
+             },
+            
+
+         },
+                StartTime = DateTime.UtcNow.AddHours(-24),  // Adjust the time range as needed
+                EndTime = DateTime.UtcNow,
+                Period = period,
+                Statistics = new List<string> { statistic }
+            };
+
+
+            var response = await cloudWatchClient.GetMetricStatisticsAsync(request);
+            Console.WriteLine($"Metric: {metricName}, InstanceId: {instanceId}, Namespace: {namespaceName}");
+            Console.WriteLine($"Request StartTime: {startTime}, EndTime: {endTime}, Period: {period}, Statistic: {statistic}");
+            Console.WriteLine($"Number of DataPoints: {response.Datapoints.Count}");
+            if (response.Datapoints != null && response.Datapoints.Count > 0)
+            {
+                // Return the average value of the latest data point
+                var latestDataPoint = response.Datapoints.OrderByDescending(dp => dp.Timestamp).FirstOrDefault();
+                if (latestDataPoint != null)
+                {
+                    return latestDataPoint.Average;
+                }
+            }
+
+            return 0;
+        }
+        private static async Task<double> GetEC2MetricAsyncForNetwork(
+             AmazonCloudWatchClient cloudWatchClient,
+             string instanceId,
+             string metricName,
+             string namespaceName, DateTime timestamp,
+             int period = 300,
+             string statistic = "Average")
+        {
+
+            var startTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day - 1, 1, 15, 0, DateTimeKind.Utc);
+            var endTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day, 6, 50, 0, DateTimeKind.Utc);
+            var request = new Amazon.CloudWatch.Model.GetMetricStatisticsRequest()
+
+
+            {
+                Namespace = namespaceName,
+                MetricName = metricName,
+                Dimensions = new List<Dimension>
+         {
+             new Dimension
+             {
+                 Name = "InstanceId",
+                 Value = instanceId
+             },
+             new Dimension
+             {
+                 Name = "interface",
+                 Value ="eth-0"
+             },
+
+
+         },
+                StartTime = DateTime.UtcNow.AddHours(-24),  // Adjust the time range as needed
+                EndTime = DateTime.UtcNow,
+                Period = period,
+                Statistics = new List<string> { statistic }
+            };
+
+
+            var response = await cloudWatchClient.GetMetricStatisticsAsync(request);
+            Console.WriteLine($"Metric: {metricName}, InstanceId: {instanceId}, Namespace: {namespaceName}");
+            Console.WriteLine($"Request StartTime: {startTime}, EndTime: {endTime}, Period: {period}, Statistic: {statistic}");
+            Console.WriteLine($"Number of DataPoints: {response.Datapoints.Count}");
+            if (response.Datapoints != null && response.Datapoints.Count > 0)
+            {
+                // Return the average value of the latest data point
+                var latestDataPoint = response.Datapoints.OrderByDescending(dp => dp.Timestamp).FirstOrDefault();
+                if (latestDataPoint != null)
+                {
+                    return latestDataPoint.Average;
+                }
+            }
+
+            return 0;
+        }
+        /*public static async Task<double> GetEC2MetricAsync(
+             AmazonCloudWatchClient cloudWatchClient,
+             string instanceId,
+             string metricName,
+             
+             int period = 300,
+             string statistic = "Average")
+        {
+            DateTime startTime = DateTime.UtcNow.AddHours(-48); // Adjust the time range as needed
+            DateTime endTime = DateTime.UtcNow;
+            try
+            {
+                var request = new GetMetricDataRequest
+                {
+                    StartTimeUtc = startTime.ToUniversalTime(),
+                    EndTimeUtc = endTime.ToUniversalTime(),
+                    MetricDataQueries = new List<MetricDataQuery>
+                    {
+                        new MetricDataQuery
+                        {
+                            Id = "ec2",
+                            MetricStat = new MetricStat
+                            {
+                                Metric = new Amazon.CloudWatch.Model.Metric
+                                {
+                                    Namespace = "CWAgent",
+                                    MetricName = metricName,
+                                    Dimensions = new List<Dimension>
+                                    {
+                                        new Dimension { Name = "InstanceId", Value = instanceId }
+                                    }
+                                },
+                                Period = period,
+                                Stat = statistic
+                            }
+                        }
+                    }
+                };
+
+                var response = await cloudWatchClient.GetMetricDataAsync(request);
+
+                if (response.MetricDataResults.Count > 0)
+                {
+                    var metricData = response.MetricDataResults[0];
+                    if (metricData.Values.Count > 0)
+                    {
+                        // Assuming we are interested in the first value (single value for 'Average' statistic)
+                        return metricData.Values[0];
+                    }
+                }
+
+                return 0;
+            }
+            catch (AmazonCloudWatchException ex)
+            {
+                Console.WriteLine($"Error retrieving CloudWatch metric data: {ex.Message}");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+                throw;
+            }
+        }
+    */
         private static async Task<List<PublicCloudARMResourceModel>> GetEC2InstancesRegionAsync(
-            AmazonEC2Client ec2Client,
-            AmazonCloudWatchClient cloudWatchClient,
-            RegionEndpoint region,
-            string awsAccountId,
-            string publicCloudConnectorId,
-            string azureRegion,
-            Dictionary<string, string> instanceIdToPlatformDetailsMapping)
+    AmazonEC2Client ec2Client,
+    AmazonCloudWatchClient cloudWatchClient,
+    RegionEndpoint region,
+    string awsAccountId,
+    string publicCloudConnectorId,
+    string azureRegion,
+    Dictionary<string, string> instanceIdToPlatformDetailsMapping)
         {
             var methodName = GetAsyncMethodName();
             Console.WriteLine($"{methodName}: Discovering EC2s in AWS region: {region} in awsAccountId: {awsAccountId}");
@@ -389,6 +644,9 @@ namespace ArcForPublicCloud
             {
                 MaxResults = MAX_RESULTS_IN_PAGE
             };
+
+            // Fetch instance type memory details
+            var instanceTypeMemoryMap = await GetInstanceTypesWithMemoryAsync(ec2Client);
 
             try
             {
@@ -404,12 +662,18 @@ namespace ArcForPublicCloud
                             var timestamp = DateTime.UtcNow;
 
                             // Get Disk Performance Data
-                            var diskPerfData = await GetPerformanceDataForDiskAsync(cloudWatchClient, instanceId, timestamp);
+                            var instanceType = instance.InstanceType;
+                            var deviceName = instance.BlockDeviceMappings.FirstOrDefault()?.DeviceName ?? "Unknown";
 
-                            // Similarly, you can call methods for CPU, Memory, Network, etc.
-                            // var cpuPerfData = await GetPerformanceDataForCPUAsync(cloudWatchClient, instanceId, timestamp);
-                            // var memoryPerfData = await GetPerformanceDataForMemoryAsync(cloudWatchClient, instanceId, timestamp);
-                            // var networkPerfData = await GetPerformanceDataForNetworkAsync(cloudWatchClient, instanceId, timestamp);
+                            var imageId=instance.ImageId;
+                            var diskPerfData = await GetPerformanceDataForDiskAsync(cloudWatchClient, instanceId, timestamp,instanceType,deviceName,imageId);
+                            var cpuPerfData = await GetPerformanceDataForCPUAsync(cloudWatchClient, instanceId, timestamp);
+                            var memoryPerfData=await GetPerformanceDataForNetworkAsync(cloudWatchClient, instanceId, timestamp);    
+                            var networkPerfData=await GetPerformanceDataForNetworkAsync(cloudWatchClient,instanceId,timestamp);
+
+                            // Get instance type memory details
+                           
+                            var memory = instanceTypeMemoryMap.ContainsKey(instanceType) ? instanceTypeMemoryMap[instanceType] : "Unknown";
 
                             var properties = JsonUtils.CreateJObject(
                                 publicCloudConnectorId,
@@ -422,8 +686,10 @@ namespace ArcForPublicCloud
                                 instance.Tags.ToDictionary(tag => tag.Key, tag => tag.Value));
 
                             // Add Disk Performance Data
-                           
-                            // Similarly, add data for CPU, Memory, Network, etc.
+                            // properties["DiskPerformanceData"] = diskPerfData; // Uncomment and implement this line
+
+                            // Add memory information to properties
+                            properties["Memory"] = memory;
 
                             try
                             {
@@ -456,6 +722,121 @@ namespace ArcForPublicCloud
             return instances;
         }
 
+        static async Task<Dictionary<string, string>> GetInstanceTypesWithMemoryAsync(AmazonEC2Client ec2Client)
+        {
+            var instanceTypeMemoryMap = new Dictionary<string, string>();
+            string nextToken = null;
+
+            do
+            {
+                var request = new DescribeInstanceTypesRequest
+                {
+                    NextToken = nextToken
+                };
+
+                var response = await ec2Client.DescribeInstanceTypesAsync(request);
+
+                foreach (var instanceType in response.InstanceTypes)
+                {
+                    var memoryInfo = instanceType.MemoryInfo;
+                    if (memoryInfo != null)
+                    {
+                        var memoryInGib = memoryInfo.SizeInMiB / 1024.0;
+                        instanceTypeMemoryMap[instanceType.InstanceType] = $"{memoryInGib} GiB";
+                    }
+                }
+
+                nextToken = response.NextToken;
+
+            } while (!string.IsNullOrEmpty(nextToken));
+
+            return instanceTypeMemoryMap;
+        }
+
+        /* private static async Task<List<PublicCloudARMResourceModel>> GetEC2InstancesRegionAsync(
+                 AmazonEC2Client ec2Client,
+                 AmazonCloudWatchClient cloudWatchClient,
+                 RegionEndpoint region,
+                 string awsAccountId,
+                 string publicCloudConnectorId,
+                 string azureRegion,
+                 Dictionary<string, string> instanceIdToPlatformDetailsMapping)
+             {
+                 var methodName = GetAsyncMethodName();
+                 Console.WriteLine($"{methodName}: Discovering EC2s in AWS region: {region} in awsAccountId: {awsAccountId}");
+
+                 var instances = new List<PublicCloudARMResourceModel>();
+                 var describeInstancesRequest = new DescribeInstancesRequest
+                 {
+                     MaxResults = MAX_RESULTS_IN_PAGE
+                 };
+
+                 try
+                 {
+                     do
+                     {
+                         var describeInstancesResponse = await ec2Client.DescribeInstancesAsync(describeInstancesRequest);
+                         foreach (var reservation in describeInstancesResponse.Reservations)
+                         {
+                             foreach (var instance in reservation.Instances)
+                             {
+                                 var instanceId = instance.InstanceId;
+                                 var arn = $"arn:aws:ec2:{region.SystemName}:{awsAccountId}:instance/{instanceId}";
+                                 var timestamp = DateTime.UtcNow;
+
+                                 // Get Disk Performance Data
+                                 var diskPerfData = await GetPerformanceDataForDiskAsync(cloudWatchClient, instanceId, timestamp);
+
+                                 // Similarly, you can call methods for CPU, Memory, Network, etc.
+                                 // var cpuPerfData = await GetPerformanceDataForCPUAsync(cloudWatchClient, instanceId, timestamp);
+                                 // var memoryPerfData = await GetPerformanceDataForMemoryAsync(cloudWatchClient, instanceId, timestamp);
+                                 // var networkPerfData = await GetPerformanceDataForNetworkAsync(cloudWatchClient, instanceId, timestamp);
+
+                                 var properties = JsonUtils.CreateJObject(
+                                     publicCloudConnectorId,
+                                     awsAccountId,
+                                     arn,
+                                     region.SystemName,
+                                     instance.InstanceId,
+                                     Constants.ServiceModelSchemaTypeName,
+                                     instance,
+                                     instance.Tags.ToDictionary(tag => tag.Key, tag => tag.Value));
+
+                                 // Add Disk Performance Data
+
+                                 // Similarly, add data for CPU, Memory, Network, etc.
+
+                                 try
+                                 {
+                                     var ec2Instance = new PublicCloudARMResourceModel
+                                     {
+                                         AzureLocation = azureRegion,
+                                         AzureResourceName = instance.InstanceId,
+                                         Properties = JsonConvert.DeserializeObject<Dictionary<string, JToken>>(properties.ToString()),
+                                     };
+                                     instances.Add(ec2Instance);
+                                 }
+                                 catch (Exception ex)
+                                 {
+                                     Console.WriteLine($"{methodName}: Error occurred while deserializing EC2 instance {instance.InstanceId} in region {region} for AWS account {awsAccountId} exceptionMessage: {ex.Message} exception: {ex}");
+                                 }
+                             }
+                         }
+                         describeInstancesRequest.NextToken = describeInstancesResponse.NextToken;
+
+                         // Added a delay to avoid throttling while calling AWS SDK.
+                         await Task.Delay(delayForPagination);
+                     } while (!string.IsNullOrEmpty(describeInstancesRequest.NextToken));
+                 }
+                 catch (Exception ex)
+                 {
+                     Console.WriteLine($"{methodName}: Error occurred while retrieving EC2 instances. Region: {region}, AwsAccount: {awsAccountId}, " +
+                         $"PublicCloudConnector: {publicCloudConnectorId}, exceptionMessage: {ex.Message} exception: {ex}");
+                 }
+                 Console.WriteLine($"{methodName}: Finished scanning EC2s. Region: {region}, AccountId: {awsAccountId}, Ec2Count: {instances.Count}");
+                 return instances;
+             }
+             */
         /*private static async Task<List<PublicCloudARMResourceModel>> GetEC2InstancesRegionAsync(
             AmazonEC2Client ec2Client,
             AmazonCloudWatchClient cloudWatchClient,
