@@ -345,7 +345,7 @@ namespace ArcForPublicCloud
              string metricName,
              string namespaceName, DateTime timestamp, string instanceType, string deviceName, string imageId,
              int period = 300,
-             string statistic = "Average")
+             string statistic = "Sum")
          {
             
              var startTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day - 1, 1, 15, 0, DateTimeKind.Utc);
@@ -397,7 +397,7 @@ namespace ArcForPublicCloud
                  var latestDataPoint = response.Datapoints.OrderByDescending(dp => dp.Timestamp).FirstOrDefault();
                  if (latestDataPoint != null)
                  {
-                     return latestDataPoint.Average;
+                     return latestDataPoint.Sum;
                  }
              }
 
@@ -461,8 +461,10 @@ namespace ArcForPublicCloud
              string statistic = "Average")
         {
 
-            var startTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day - 1, 1, 15, 0, DateTimeKind.Utc);
-            var endTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day, 6, 50, 0, DateTimeKind.Utc);
+            //var startTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day - 1, 1, 15, 0, DateTimeKind.Utc);
+            //var endTime = new DateTime(timestamp.Year, timestamp.Month, timestamp.Day, 6, 50, 0, DateTimeKind.Utc);
+            var startTime = timestamp.AddHours(-24); // Adjust to 24 hours before the provided timestamp
+            var endTime = timestamp;
             var request = new Amazon.CloudWatch.Model.GetMetricStatisticsRequest()
 
 
@@ -499,10 +501,19 @@ namespace ArcForPublicCloud
             {
                 // Return the average value of the latest data point
                 var latestDataPoint = response.Datapoints.OrderByDescending(dp => dp.Timestamp).FirstOrDefault();
-                if (latestDataPoint != null)
+                /*if (latestDataPoint != null)
                 {
                     return latestDataPoint.Average;
                 }
+                */
+                var cpuTimeIdleSeconds = latestDataPoint.Average / 100.0;
+
+                // Calculate total time duration in seconds
+                var totalTimeSeconds = (endTime - startTime).TotalSeconds;
+
+                // Calculate CPU idle percentage
+                var cpuIdlePercentage = (1 - cpuTimeIdleSeconds / totalTimeSeconds) * 100;
+                return cpuIdlePercentage;
             }
 
             return 0;
